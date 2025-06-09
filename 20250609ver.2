@@ -1,0 +1,153 @@
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+import os
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from datetime import datetime
+import google.generativeai as genai
+
+# --- 設定 ---
+st.set_page_config(page_title="CSV分析とPPT自動生成", layout="wide")
+st.title("CSVデータ分析 & Gemini示唆 & PowerPoint出力")
+
+# --- ファイルパス指定（ローカルの固定CSVファイルを使用） ---
+CSV_PATH = "C:\\Users\\shomatsubara\\Documents\\Python_project\\AI研修_諸データ_clean.csv"
+
+# --- Gemini APIキーの取得 ---
+api_key = os.getenv("GOOGLE_API_KEY")
+if not api_key:
+    st.error("環境変数 'GOOGLE_API_KEY' が設定されていません。PowerShell または .env で設定してください。")
+    st.stop()
+
+# --- データ読み込み ---
+st.subheader("① データの読み込みと確認")
+try:
+    df = pd.read_csv(CSV_PATH, encoding="utf-8")
+    df.columns = df.columns.str.strip()
+
+    if "timeCd" not in df.columns or "value" not in df.columns:
+        st.error("CSVファイルに 'timeCd' と 'value' の列が必要です。")
+        st.stop()
+
+    df['timeCd'] = df['timeCd'].astype(str)
+    df['Date'] = pd.to_datetime(df['timeCd'].str[:6], format='%Y%m', errors='coerce')
+    df = df.dropna(subset=['Date'])
+    df = df.rename(columns={'value': 'Value'})
+
+    st.dataframe(df.head())
+except Exception as e:
+    st.error(f"CSV 読み込み失敗: {e}")
+    st.stop()
+
+# --- グラフ描画 ---
+st.subheader("② 経済トレンドの可視化")
+fig, ax = plt.subplots(figsize=(10, 4))
+graph_title = "Transition of economic trend"
+ax.plot(df['Date'], df['Value'], marker='o')
+ax.set_title(graph_title)
+ax.set_xlabel("Date")
+ax.set_ylabel("Value")
+ax.grid(True)
+st.pyplot(fig)
+
+# --- Gemini API による示唆の生成 ---
+st.subheader("③ Gemini による示唆の生成")
+genai.configure(api_key=api_key)
+model = genai.GenerativeModel("gemini-2.5-flash-preview-04-17")
+
+# ✅ 時系列順・重要列のみ・最大100行に整形
+csv_data_for_prompt = (
+    df.sort_values("Date")[["Date", "Value"]]
+    .tail(100)  # 必要に応じて .head(100) や .sample(50) に変更可能
+    .to_string(index=False)
+)
+
+# ✅ プロンプトにテキストとして埋め込む
+prompt = (
+    f"グラフタイトル: {graph_title}\n\n"
+    "以下は時系列の経済データです。\n"
+    "このデータに基づいて、\n"
+    "1. 注目すべき傾向と理由を\n"
+    "を50文字以内で端的に述べてください。その際、文字数カウントは表示不要です。\n\n"
+    "【トレンドデータ（Date, Value）】:\n"
+    f"{csv_data_for_prompt}"
+)
+
+# スライドタイトル生成用のプロンプト
+title_prompt = (
+    f"グラフタイトル: {graph_title}\n\n"
+    "以下は時系列の経済データです。\n"
+    "このデータの分析結果を表現する、\n"
+    "15文字程度の簡潔なタイトルを1つだけ生成してください。\n"
+    "タイトルのみを回答し、説明文は不要です。\n\n"
+    "【トレンドデータ（Date, Value）】:\n"
+    f"{csv_data_for_prompt}"
+)
+
+# --- Gemini実行ボタン ---
+if st.button("Geminiで示唆を生成"):
+    with st.spinner("Geminiが分析中..."):
+        try:
+            # 示唆とタイトルを同時に生成
+            response = model.generate_content(prompt)
+            insight = response.text.strip()
+            
+            title_response = model.generate_content(title_prompt)
+            slide_title = title_response.text.strip()
+            
+            st.success("Geminiからの示唆:")
+            st.markdown(insight)
+            st.success("生成されたタイトル:")
+            st.markdown(slide_title)
+
+            # --- PowerPoint 作成 ---
+            st.subheader("④ PowerPoint 出力")
+            prs = Presentation()
+
+            # タイトルスライド（1枚目）
+            slide = prs.slides.add_slide(prs.slide_layouts[0])
+            slide.shapes.title.text = "経済データ分析レポート"
+            slide.placeholders[1].text = "Geminiによる示唆を含む"
+
+            # 統合スライド（2枚目：タイトル + 示唆 + グラフを1枚に縦配置）
+            slide = prs.slides.add_slide(prs.slide_layouts[6])  # 空白レイアウト
+            
+            # 上部にGemini生成タイトルを配置
+            title_textbox = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(9), Inches(0.8))
+            title_text_frame = title_textbox.text_frame
+            title_text_frame.clear()
+            
+            title_para = title_text_frame.add_paragraph()
+            title_para.text = slide_title
+            title_para.font.size = Pt(24)
+            title_para.font.bold = True
+            
+            # タイトル下にリード文として示唆を配置
+            textbox = slide.shapes.add_textbox(Inches(0.5), Inches(1.2), Inches(9), Inches(1.5))
+            text_frame = textbox.text_frame
+            text_frame.clear()
+            
+            # リード文として示唆内容を配置
+            lead_para = text_frame.add_paragraph()
+            lead_para.text = insight
+            lead_para.font.size = Pt(16)
+            
+            # 下部中央にグラフを配置
+            graph_path = "trend_plot.png"
+            fig.savefig(graph_path, dpi=150, bbox_inches='tight')
+            slide.shapes.add_picture(graph_path, Inches(1.5), Inches(3), width=Inches(7), height=Inches(4))
+
+            # ダウンロードボタン
+            pptx_filename = "economic_insight_report.pptx"
+            prs.save(pptx_filename)
+            with open(pptx_filename, "rb") as f:
+                st.download_button(
+                    "PowerPointをダウンロード",
+                    data=f,
+                    file_name=pptx_filename,
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                )
+
+        except Exception as e:
+            st.error(f"Gemini APIエラー: {e}")
