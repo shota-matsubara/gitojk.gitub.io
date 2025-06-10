@@ -1,0 +1,328 @@
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+import os
+import glob
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from datetime import datetime
+import google.generativeai as genai
+
+# --- 設定 ---
+st.set_page_config(page_title="CSV分析とPPT自動生成", layout="wide")
+st.title("CSVデータ分析 & Gemini示唆 & PowerPoint出力")
+
+# --- CSVファイルフォルダの指定 ---
+CSV_FOLDER = "C:\\Users\\shomatsubara\\Documents\\Python_project\\"  # CSVファイルが格納されているフォルダ
+
+# --- CSVファイル一覧の取得 ---
+@st.cache_data
+def get_csv_files(folder_path):
+    """指定フォルダ内のCSVファイル一覧を取得"""
+    try:
+        csv_pattern = os.path.join(folder_path, "*.csv")
+        csv_files = glob.glob(csv_pattern)
+        # ファイル名のみを抽出（パスなし）
+        csv_filenames = [os.path.basename(file) for file in csv_files]
+        return csv_files, csv_filenames
+    except Exception as e:
+        st.error(f"CSVファイルの検索でエラーが発生しました: {e}")
+        return [], []
+
+# --- ファイル選択 ---
+st.subheader("① CSVファイルの選択")
+
+csv_full_paths, csv_filenames = get_csv_files(CSV_FOLDER)
+
+if not csv_filenames:
+    st.error(f"指定フォルダ「{CSV_FOLDER}」にCSVファイルが見つかりません。")
+    st.stop()
+
+# セレクトボックスでファイル選択
+selected_filename = st.selectbox(
+    "分析するCSVファイルを選択してください:",
+    csv_filenames,
+    index=0
+)
+
+# 選択されたファイルのフルパスを取得
+selected_file_index = csv_filenames.index(selected_filename)
+selected_csv_path = csv_full_paths[selected_file_index]
+
+st.info(f"選択されたファイル: {selected_filename}")
+
+# --- Gemini APIキーの取得 ---
+api_key = os.getenv("GOOGLE_API_KEY")
+if not api_key:
+    st.error("環境変数  'GOOGLE_API_KEY' が設定されていません。PowerShell または .env で設定してください。")
+    st.stop()
+
+# --- データ読み込み ---
+st.subheader("② データの読み込みと確認")
+
+@st.cache_data
+def load_csv_data(file_path):
+    """CSVデータを読み込み、前処理を行う"""
+    try:
+        df = pd.read_csv(file_path, encoding="utf-8")
+        df.columns = df.columns.str.strip()
+        
+        # 必要な列の存在チェック
+        if "timeCd" not in df.columns or "value" not in df.columns:
+            return None, "CSVファイルに 'timeCd' と 'value' の列が必要です。"
+        
+        # データの前処理
+        df['timeCd'] = df['timeCd'].astype(str)
+        
+        # 日付変換の改善（複数のフォーマットに対応）
+        df['Date'] = None
+        
+        # まず6桁の年月フォーマット（YYYYMM）を試す
+        mask_6digit = df['timeCd'].str.len() >= 6
+        if mask_6digit.any():
+            df.loc[mask_6digit, 'Date'] = pd.to_datetime(
+                df.loc[mask_6digit, 'timeCd'].str[:6], 
+                format='%Y%m', 
+                errors='coerce'
+            )
+        
+        # 8桁の年月日フォーマット（YYYYMMDD）も試す
+        mask_8digit = df['timeCd'].str.len() >= 8
+        if mask_8digit.any():
+            df.loc[mask_8digit & df['Date'].isna(), 'Date'] = pd.to_datetime(
+                df.loc[mask_8digit & df['Date'].isna(), 'timeCd'].str[:8], 
+                format='%Y%m%d', 
+                errors='coerce'
+            )
+        
+        # 4桁の年フォーマット（YYYY）も試す
+        mask_4digit = df['timeCd'].str.len() == 4
+        if mask_4digit.any():
+            df.loc[mask_4digit & df['Date'].isna(), 'Date'] = pd.to_datetime(
+                df.loc[mask_4digit & df['Date'].isna(), 'timeCd'] + '01', 
+                format='%Y%m', 
+                errors='coerce'
+            )
+        
+        # 日付変換に失敗した行を削除
+        initial_count = len(df)
+        df = df.dropna(subset=['Date'])
+        df = df.rename(columns={'value': 'Value'})
+        
+        # 数値データのクリーンアップ
+        df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
+        df = df.dropna(subset=['Value'])
+        
+        final_count = len(df)
+        
+        if final_count == 0:
+            return None, "有効なデータが見つかりませんでした。日付形式または数値形式を確認してください。"
+        
+        # データが大幅に減少した場合の警告メッセージ
+        if final_count < initial_count * 0.5:
+            warning_msg = f"注意: データの{initial_count - final_count}行が無効な形式のため除外されました。"
+            return df, warning_msg
+        
+        return df, None
+    except Exception as e:
+        return None, f"CSV 読み込み失敗: {e}"
+
+# データ読み込み実行
+df, error_message = load_csv_data(selected_csv_path)
+
+if error_message:
+    if "注意:" in error_message:
+        st.warning(error_message)
+    else:
+        st.error(error_message)
+        st.stop()
+
+# データの基本チェック
+if df is None or len(df) == 0:
+    st.error("有効なデータが読み込めませんでした。")
+    st.stop()
+
+# データプレビュー表示
+st.write(f"**データ件数:** {len(df)}行")
+
+# 日付範囲の安全な表示
+if not df['Date'].isna().all():
+    date_min = df['Date'].min()
+    date_max = df['Date'].max()
+    if pd.notna(date_min) and pd.notna(date_max):
+        st.write(f"**期間:** {date_min.strftime('%Y年%m月')} ～ {date_max.strftime('%Y年%m月')}")
+    else:
+        st.write("**期間:** 日付情報が不完全です")
+else:
+    st.write("**期間:** 日付情報が取得できませんでした")
+
+st.dataframe(df.head(10))
+
+# --- グラフ描画 ---
+st.subheader("③ 経済トレンドの可視化")
+
+# グラフ描画
+fig, ax = plt.subplots(figsize=(12, 6))
+graph_title = f"{selected_filename.replace('.csv', '')} - Economic Trend Analysis"
+ax.plot(df['Date'], df['Value'], marker='o', linewidth=2, markersize=4)
+ax.set_title(graph_title, fontsize=16, pad=20)
+ax.set_xlabel("Date", fontsize=12)
+ax.set_ylabel("Value", fontsize=12)
+ax.grid(True, alpha=0.3)
+plt.xticks(rotation=45)
+plt.tight_layout()
+
+st.pyplot(fig)
+
+# データ統計情報の表示
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.metric("最大値", f"{df['Value'].max():.2f}")
+with col2:
+    st.metric("最小値", f"{df['Value'].min():.2f}")
+with col3:
+    st.metric("平均値", f"{df['Value'].mean():.2f}")
+with col4:
+    if df['Value'].std() is not None:
+        st.metric("標準偏差", f"{df['Value'].std():.2f}")
+    else:
+        st.metric("標準偏差", "N/A")
+
+# --- Gemini API による示唆の生成 ---
+st.subheader("④ Gemini による示唆の生成")
+
+# Gemini設定
+genai.configure(api_key=api_key)
+model = genai.GenerativeModel("gemini-2.5-flash-preview-04-17")
+
+# データ準備（最新100行を使用）
+csv_data_for_prompt = (
+    df.sort_values("Date")[["Date", "Value"]]
+    .tail(100)
+    .to_string(index=False)
+)
+
+# プロンプト作成
+date_min = df['Date'].min()
+date_max = df['Date'].max()
+date_range_text = ""
+if pd.notna(date_min) and pd.notna(date_max):
+    date_range_text = f"- 期間: {date_min.strftime('%Y年%m月')} ～ {date_max.strftime('%Y年%m月')}\n"
+else:
+    date_range_text = "- 期間: 日付情報が不完全\n"
+
+prompt = (
+    f"ファイル名: {selected_filename}\n"
+    f"グラフタイトル: {graph_title}\n\n"
+    "以下は時系列の経済データです。\n"
+    "このデータに基づいて、\n"
+    "1. 注目すべき傾向と理由を\n"
+    "を50文字以内で端的に述べてください。その際、文字数カウントは表示不要です。\n\n"
+    f"データ統計:\n"
+    f"{date_range_text}"
+    f"- 最大値: {df['Value'].max():.2f}\n"
+    f"- 最小値: {df['Value'].min():.2f}\n"
+    f"- 平均値: {df['Value'].mean():.2f}\n\n"
+    "【トレンドデータ（Date, Value）】:\n"
+    f"{csv_data_for_prompt}"
+)
+
+# スライドタイトル生成用のプロンプト
+title_prompt = (
+    f"ファイル名: {selected_filename}\n"
+    f"グラフタイトル: {graph_title}\n\n"
+    "以下は時系列の経済データです。\n"
+    "このデータの分析結果を表現する、\n"
+    "15文字程度の簡潔なタイトルを1つだけ生成してください。\n"
+    "タイトルのみを回答し、説明文は不要です。\n\n"
+    "【トレンドデータ（Date, Value）】:\n"
+    f"{csv_data_for_prompt}"
+)
+
+# --- Gemini実行ボタン ---
+if st.button("🤖 Geminiで示唆を生成", type="primary"):
+    with st.spinner("Geminiが分析中..."):
+        try:
+            # 示唆とタイトルを同時に生成
+            response = model.generate_content(prompt)
+            insight = response.text.strip()
+            
+            title_response = model.generate_content(title_prompt)
+            slide_title = title_response.text.strip()
+            
+            # 結果表示
+            st.success("✅ Geminiからの示唆:")
+            st.markdown(f"**{insight}**")
+            st.success("✅ 生成されたタイトル:")
+            st.markdown(f"**{slide_title}**")
+
+            # --- PowerPoint 作成 ---
+            st.subheader("⑤ PowerPoint 出力")
+            
+            with st.spinner("PowerPointを生成中..."):
+                prs = Presentation()
+
+                # タイトルスライド（1枚目）
+                slide = prs.slides.add_slide(prs.slide_layouts[0])
+                slide.shapes.title.text = "経済データ分析レポート"
+                slide.placeholders[1].text = f"分析対象: {selected_filename}\nGeminiによる示唆を含む"
+
+                # 統合スライド（2枚目：タイトル + 示唆 + グラフを1枚に縦配置）
+                slide = prs.slides.add_slide(prs.slide_layouts[6])  # 空白レイアウト
+                
+                # 上部にGemini生成タイトルを配置
+                title_textbox = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(9), Inches(0.8))
+                title_text_frame = title_textbox.text_frame
+                title_text_frame.clear()
+                
+                title_para = title_text_frame.add_paragraph()
+                title_para.text = slide_title
+                title_para.font.size = Pt(24)
+                title_para.font.bold = True
+                
+                # タイトル下にリード文として示唆を配置
+                textbox = slide.shapes.add_textbox(Inches(0.5), Inches(1.2), Inches(9), Inches(1.5))
+                text_frame = textbox.text_frame
+                text_frame.clear()
+                
+                # リード文として示唆内容を配置
+                lead_para = text_frame.add_paragraph()
+                lead_para.text = insight
+                lead_para.font.size = Pt(16)
+                
+                # 下部中央にグラフを配置
+                graph_path = f"trend_plot_{selected_filename.replace('.csv', '')}.png"
+                fig.savefig(graph_path, dpi=150, bbox_inches='tight')
+                slide.shapes.add_picture(graph_path, Inches(1.5), Inches(3), width=Inches(7), height=Inches(4))
+
+                # ダウンロードボタン
+                pptx_filename = f"economic_insight_report_{selected_filename.replace('.csv', '')}.pptx"
+                prs.save(pptx_filename)
+                
+                with open(pptx_filename, "rb") as f:
+                    st.download_button(
+                        "📥 PowerPointをダウンロード",
+                        data=f,
+                        file_name=pptx_filename,
+                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        type="primary"
+                    )
+                
+                st.success(f"✅ PowerPointファイル「{pptx_filename}」が生成されました！")
+
+        except Exception as e:
+            st.error(f"❌ Gemini APIエラー: {e}")
+
+# --- サイドバーに追加情報 ---
+with st.sidebar:
+    st.header("📊 アプリ情報")
+    st.info(f"**検索フォルダ:** {CSV_FOLDER}")
+    st.info(f"**利用可能ファイル数:** {len(csv_filenames)}個")
+    
+    if csv_filenames:
+        st.write("**利用可能なCSVファイル:**")
+        for i, filename in enumerate(csv_filenames, 1):
+            if filename == selected_filename:
+                st.write(f"✅ {i}. **{filename}** (選択中)")
+            else:
+                st.write(f"   {i}. {filename}")
