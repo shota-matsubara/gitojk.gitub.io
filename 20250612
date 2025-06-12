@@ -1,0 +1,558 @@
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+import os
+import glob
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.enum.text import PP_ALIGN
+from datetime import datetime
+import google.generativeai as genai
+
+# --- 日本語フォント設定 ---
+def setup_japanese_font():
+    """日本語フォントを設定"""
+    # Windowsの場合のフォント候補
+    font_candidates = [
+        'Yu Gothic',           # Windows 10/11標準
+        'Meiryo',             # Windows標準
+        'MS Gothic',          # Windows標準
+        'Hiragino Sans',      # macOS
+        'DejaVu Sans'         # Linux（日本語は表示されないが、エラーを防ぐ）
+    ]
+    
+    available_fonts = [f.name for f in fm.fontManager.ttflist]
+    
+    for font_name in font_candidates:
+        if font_name in available_fonts:
+            plt.rcParams['font.family'] = font_name
+            st.info(f"日本語フォント設定: {font_name}")
+            return font_name
+    
+    # フォントが見つからない場合の警告
+    st.warning("日本語対応フォントが見つかりません。グラフの日本語が正しく表示されない可能性があります。")
+    return None
+
+# --- 設定 ---
+st.set_page_config(page_title="CSV分析とPPT自動生成", layout="wide")
+st.title("CSVデータ分析 & Gemini示唆 & PowerPoint出力")
+
+# 日本語フォント設定を実行
+setup_japanese_font()
+
+# --- ファイルパスの定義 ---
+# CSVファイルが格納されているフォルダ
+CSV_FOLDER = "C:\\Users\\shomatsubara\\Documents\\Python_project\\"
+
+# ★★★ 使用するPowerPointテンプレートのフルパスを指定 ★★★
+# ※ .ppt ではなく、.pptx 形式で保存したファイルのパスを指定してください
+PPTX_TEMPLATE_PATH = "C:\\Users\\shomatsubara\\OneDrive - ABeam Consulting Ltd\\ドキュメント\\新人研修\\テンプレ.pptx"
+
+# --- CSVファイルのカテゴリ定義 ---
+CSV_CATEGORIES = {
+    "金融": [
+        "コール市場統計＜日本銀行＞.csv",
+        "マネタリーベース平均残高.csv",
+        "マネーストック統計＜日本銀行＞.csv",
+        "国内企業物価指数（総平均）2020年基準.csv",
+        "貸出・預金動向＜日本銀行＞.csv",
+        "短観_boj.csv",
+        "東証株価指数（TOPIX）.csv",
+        "輸入物価指数（総平均）（円ベース）2020年基準.csv",
+        "輸出物価指数（総平均）（円ベース）2020年基準.csv"
+    ],
+    "企業・家計・経済": [
+        "企業等数.csv",
+        "景気動向指数（一致）2015年基準.csv",
+        "景気動向指数（一致）2020年基準.csv",
+        "消費者物価指数（総合）2015年基準.csv",
+        "消費者物価指数（総合）2020年基準.csv",
+        "国内総生産（支出側）（名目）（米ドル表示）.csv"
+    ],
+    "鉱業": [
+        "鉱工業生産指数　2015年基準.csv",
+        "鉱工業生産指数　2020年基準.csv",
+        "製造工業生産能力指数　2015年基準.csv",
+        "製造工業生産能力指数　2020年基準.csv",
+        "製造工業稼働率指数　2015年基準.csv",
+        "製造工業稼働率指数　2020年基準.csv"
+    ],
+    "住宅・土地・建物": [
+        "住宅数.csv"
+    ],
+    "人口・世帯": [
+        "世帯数（総数）.csv",
+        "出生数（外国人を含む）.csv",
+        "出生率（人口千対）.csv",
+        "死亡数（外国人を含む）.csv",
+        "死亡率（人口千対）.csv",
+        "総人口（総数）.csv"
+    ],
+    "労働・賃金": [
+        "完全失業率（男女計）.csv",
+        "実質賃金指数（現金給与総額）.csv",
+        "就業率（総数）.csv",
+        "役員を除く雇用者に占める非正規の職員・従業員の割合（男女計）.csv",
+        "正規の職員・従業員（男女計）.csv",
+        "非正規の職員・従業員（男女計）.csv"
+    ]
+}
+
+@st.cache_data
+def get_categorized_csv_files(folder_path, categories):
+    """カテゴリ別にCSVファイルを整理"""
+    try:
+        csv_pattern = os.path.join(folder_path, "*.csv")
+        all_csv_files = glob.glob(csv_pattern)
+        all_csv_filenames = [os.path.basename(file) for file in all_csv_files]
+        
+        # カテゴリ別に整理
+        categorized_files = {}
+        categorized_paths = {}
+        
+        for category, filenames in categories.items():
+            category_files = []
+            category_paths = []
+            
+            for filename in filenames:
+                if filename in all_csv_filenames:
+                    category_files.append(filename)
+                    # フルパスを取得
+                    file_index = all_csv_filenames.index(filename)
+                    category_paths.append(all_csv_files[file_index])
+            
+            if category_files:  # ファイルが存在する場合のみ追加
+                categorized_files[category] = category_files
+                categorized_paths[category] = category_paths
+        
+        return categorized_files, categorized_paths, all_csv_filenames
+    except Exception as e:
+        st.error(f"CSVファイルの検索でエラーが発生しました: {e}")
+        return {}, {}, []
+
+# --- ファイル選択 ---
+st.subheader("① CSVファイルの選択")
+
+categorized_files, categorized_paths, all_filenames = get_categorized_csv_files(CSV_FOLDER, CSV_CATEGORIES)
+
+if not categorized_files:
+    st.error(f"指定フォルダ「{CSV_FOLDER}」に対象のCSVファイルが見つかりません。")
+    st.stop()
+
+# カテゴリ選択
+col1, col2 = st.columns([1, 2])
+
+with col1:
+    selected_category = st.selectbox(
+        "データカテゴリを選択:",
+        list(categorized_files.keys()),
+        index=0
+    )
+
+with col2:
+    # 選択されたカテゴリのファイル一覧
+    if selected_category in categorized_files:
+        selected_filename = st.selectbox(
+            "分析するCSVファイルを選択:",
+            categorized_files[selected_category],
+            index=0
+        )
+    else:
+        st.error("選択されたカテゴリにファイルがありません。")
+        st.stop()
+
+# 選択されたファイルのフルパスを取得
+if selected_category in categorized_paths:
+    file_index = categorized_files[selected_category].index(selected_filename)
+    selected_csv_path = categorized_paths[selected_category][file_index]
+else:
+    st.error("ファイルパスの取得に失敗しました。")
+    st.stop()
+
+st.info(f"選択されたカテゴリ: **{selected_category}**")
+st.info(f"選択されたファイル: **{selected_filename}**")
+
+# --- Gemini APIキーの取得 ---
+api_key = os.getenv("GOOGLE_API_KEY")
+if not api_key:
+    st.error("環境変数 'GOOGLE_API_KEY' が設定されていません。PowerShell または .env で設定してください。")
+    st.stop()
+
+# --- データ読み込み ---
+st.subheader("② データの読み込みと確認")
+
+@st.cache_data
+def load_csv_data(file_path):
+    """CSVデータを読み込み、前処理を行う"""
+    try:
+        df = pd.read_csv(file_path, encoding="utf-8")
+        df.columns = df.columns.str.strip()
+        
+        # 必要な列の存在チェック
+        if "timeCd" not in df.columns or "value" not in df.columns:
+            return None, "CSVファイルに 'timeCd' と 'value' の列が必要です。"
+        
+        # データの前処理
+        df['timeCd'] = df['timeCd'].astype(str)
+        
+        # 日付変換の改善（複数のフォーマットに対応）
+        df['Date'] = None
+        
+        # まず6桁の年月フォーマット（YYYYMM）を試す
+        mask_6digit = df['timeCd'].str.len() >= 6
+        if mask_6digit.any():
+            df.loc[mask_6digit, 'Date'] = pd.to_datetime(
+                df.loc[mask_6digit, 'timeCd'].str[:6], 
+                format='%Y%m', 
+                errors='coerce'
+            )
+        
+        # 8桁の年月日フォーマット（YYYYMMDD）も試す
+        mask_8digit = df['timeCd'].str.len() >= 8
+        if mask_8digit.any():
+            df.loc[mask_8digit & df['Date'].isna(), 'Date'] = pd.to_datetime(
+                df.loc[mask_8digit & df['Date'].isna(), 'timeCd'].str[:8], 
+                format='%Y%m%d', 
+                errors='coerce'
+            )
+        
+        # 4桁の年フォーマット（YYYY）も試す
+        mask_4digit = df['timeCd'].str.len() == 4
+        if mask_4digit.any():
+            df.loc[mask_4digit & df['Date'].isna(), 'Date'] = pd.to_datetime(
+                df.loc[mask_4digit & df['Date'].isna(), 'timeCd'] + '01', 
+                format='%Y%m', 
+                errors='coerce'
+            )
+        
+        # 日付変換に失敗した行を削除
+        initial_count = len(df)
+        df = df.dropna(subset=['Date'])
+        df = df.rename(columns={'value': 'Value'})
+        
+        # 数値データのクリーンアップ
+        df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
+        df = df.dropna(subset=['Value'])
+        
+        final_count = len(df)
+        
+        if final_count == 0:
+            return None, "有効なデータが見つかりませんでした。日付形式または数値形式を確認してください。"
+        
+        # データが大幅に減少した場合の警告メッセージ
+        if final_count < initial_count * 0.5:
+            warning_msg = f"注意: データの{initial_count - final_count}行が無効な形式のため除外されました。"
+            return df, warning_msg
+        
+        return df, None
+    except Exception as e:
+        return None, f"CSV 読み込み失敗: {e}"
+
+# データ読み込み実行
+df, error_message = load_csv_data(selected_csv_path)
+
+if error_message:
+    if "注意:" in error_message:
+        st.warning(error_message)
+    else:
+        st.error(error_message)
+        st.stop()
+
+# データの基本チェック
+if df is None or len(df) == 0:
+    st.error("有効なデータが読み込めませんでした。")
+    st.stop()
+
+# データプレビュー表示
+st.write(f"**データ件数:** {len(df)}行")
+
+# 日付範囲の安全な表示
+if not df['Date'].isna().all():
+    date_min = df['Date'].min()
+    date_max = df['Date'].max()
+    if pd.notna(date_min) and pd.notna(date_max):
+        st.write(f"**期間:** {date_min.strftime('%Y年%m月')} ～ {date_max.strftime('%Y年%m月')}")
+    else:
+        st.write("**期間:** 日付情報が不完全です")
+else:
+    st.write("**期間:** 日付情報が取得できませんでした")
+
+st.dataframe(df.head(10))
+
+# --- グラフ描画 ---
+st.subheader("③ 経済トレンドの可視化")
+
+# グラフタイトルを日本語対応に修正
+graph_title = f"{selected_filename.replace('.csv', '')} - 経済動向分析"
+
+# グラフ描画
+fig, ax = plt.subplots(figsize=(12, 6))
+ax.plot(df['Date'], df['Value'], marker='o', linewidth=2, markersize=4)
+ax.set_title(graph_title, fontsize=16, pad=20)
+ax.set_xlabel("年月", fontsize=12)
+ax.set_ylabel("数値", fontsize=12)
+ax.grid(True, alpha=0.3)
+plt.xticks(rotation=45)
+plt.tight_layout()
+
+st.pyplot(fig)
+
+# データ統計情報の表示
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.metric("最大値", f"{df['Value'].max():.2f}")
+with col2:
+    st.metric("最小値", f"{df['Value'].min():.2f}")
+with col3:
+    st.metric("平均値", f"{df['Value'].mean():.2f}")
+with col4:
+    if df['Value'].std() is not None:
+        st.metric("標準偏差", f"{df['Value'].std():.2f}")
+    else:
+        st.metric("標準偏差", "N/A")
+
+# --- Gemini API による示唆の生成 ---
+st.subheader("④ Gemini による示唆の生成")
+
+# Gemini設定
+genai.configure(api_key=api_key)
+model = genai.GenerativeModel("gemini-2.5-flash-preview-04-17")
+
+# データ準備（最新100行を使用）
+csv_data_for_prompt = (
+    df.sort_values("Date")[["Date", "Value"]]
+    .tail(100)
+    .to_string(index=False)
+)
+
+# プロンプト作成
+date_min = df['Date'].min()
+date_max = df['Date'].max()
+date_range_text = ""
+if pd.notna(date_min) and pd.notna(date_max):
+    date_range_text = f"- 期間: {date_min.strftime('%Y年%m月')} ～ {date_max.strftime('%Y年%m月')}\n"
+else:
+    date_range_text = "- 期間: 日付情報が不完全\n"
+
+prompt = (
+    f"ファイル名: {selected_filename}\n"
+    f"グラフタイトル: {graph_title}\n\n"
+    "以下は時系列の経済データです。\n"
+    "このデータに基づいて、\n"
+    "1. 注目すべき傾向と理由を\n"
+    "を50文字以内で端的に述べてください。その際、文字数カウントは表示不要です。\n\n"
+    f"データ統計:\n"
+    f"{date_range_text}"
+    f"- 最大値: {df['Value'].max():.2f}\n"
+    f"- 最小値: {df['Value'].min():.2f}\n"
+    f"- 平均値: {df['Value'].mean():.2f}\n\n"
+    "【トレンドデータ（Date, Value）】:\n"
+    f"{csv_data_for_prompt}"
+)
+
+# スライドタイトル生成用のプロンプト
+title_prompt = (
+    f"ファイル名: {selected_filename}\n"
+    f"グラフタイトル: {graph_title}\n\n"
+    "以下は時系列の経済データです。\n"
+    "このデータの分析結果を表現する、\n"
+    "15文字程度の簡潔なタイトルを1つだけ生成してください。\n"
+    "タイトルのみを回答し、説明文は不要です。\n\n"
+    "【トレンドデータ（Date, Value）】:\n"
+    f"{csv_data_for_prompt}"
+)
+
+# --- Gemini実行ボタン ---
+if st.button("🤖 Geminiで示唆を生成", type="primary"):
+    with st.spinner("Geminiが分析中..."):
+        try:
+            # 示唆とタイトルを同時に生成
+            response = model.generate_content(prompt)
+            insight = response.text.strip()
+            
+            title_response = model.generate_content(title_prompt)
+            slide_title = title_response.text.strip()
+            
+            # 結果表示
+            st.success("✅ Geminiからの示唆:")
+            st.markdown(f"**{insight}**")
+            st.success("✅ 生成されたタイトル:")
+            st.markdown(f"**{slide_title}**")
+
+            # ★★★ PowerPoint作成部分（画像通りの配置版） ★★★
+            st.subheader("⑤ PowerPoint 出力")
+
+            with st.spinner("PowerPointを生成中..."):
+                try:
+                    # テンプレートファイル存在確認
+                    if not os.path.exists(PPTX_TEMPLATE_PATH):
+                        st.error(f"テンプレートファイルが見つかりません: {PPTX_TEMPLATE_PATH}")
+                    else:
+                        # テンプレート読み込み
+                        prs = Presentation(PPTX_TEMPLATE_PATH)
+                        
+                        # 既存スライド数を確認
+                        st.info(f"既存スライド数: {len(prs.slides)}枚")
+                        st.info(f"利用可能なスライドレイアウト数: {len(prs.slide_layouts)}")
+                        
+                        # 最低2枚のスライドが必要
+                        if len(prs.slides) < 2:
+                            st.error("テンプレートに最低2枚のスライドが必要です。")
+                        else:
+                            # ===========================================
+                            # 【1枚目】既存スライドにタイトル情報を追加
+                            # ===========================================
+                            st.info("📄 1枚目: 既存スライドにタイトル情報を編集中...")
+                            
+                            # 既存の1枚目スライドを取得
+                            title_slide = prs.slides[0]
+                            
+                            # 既存のテキストボックスを順番に設定
+                            text_boxes = []
+                            for shape in title_slide.shapes:
+                                if hasattr(shape, 'text_frame') and shape.text_frame:
+                                    text_boxes.append(shape)
+                            
+                            # 1番目のテキストボックス：メインタイトル
+                            if len(text_boxes) >= 1:
+                                title_box = text_boxes[0]
+                                title_box.text_frame.clear()
+                                title_para = title_box.text_frame.add_paragraph()
+                                title_para.text = "経済データ分析レポート"
+                                title_para.font.size = Pt(28)
+                                title_para.font.bold = True
+                                title_para.alignment = PP_ALIGN.LEFT
+                                st.success("✅ 1番目のテキストボックスにタイトル設定")
+                            
+                            # 2番目のテキストボックス：詳細情報（作成日のみ）
+                            if len(text_boxes) >= 2:
+                                info_box = text_boxes[1]
+                                info_box.text_frame.clear()
+                                
+                                # 作成日のみ
+                                para1 = info_box.text_frame.add_paragraph()
+                                para1.text = f"作成日: {datetime.now().strftime('%Y年%m月%d日')}"
+                                para1.font.size = Pt(16)
+                                para1.alignment = PP_ALIGN.LEFT
+                                
+                                st.success("✅ 2番目のテキストボックスに作成日設定")
+                            
+                            # ===========================================
+                            # 【2枚目】既存スライドにグラフ＋示唆を追加
+                            # ===========================================
+                            st.info("📈 2枚目: 既存スライドにグラフ＋示唆を編集中...")
+                            
+                            # 既存の2枚目スライドを取得
+                            content_slide = prs.slides[1]
+                            
+                            # 既存のテキストボックスを取得
+                            content_text_boxes = []
+                            for shape in content_slide.shapes:
+                                if hasattr(shape, 'text_frame') and shape.text_frame:
+                                    content_text_boxes.append(shape)
+                            
+                            # 1番目のテキストボックス：AI分析結果（リード文）
+                            if len(content_text_boxes) >= 1:
+                                insight_box = content_text_boxes[0]
+                                insight_box.text_frame.clear()
+                                insight_para = insight_box.text_frame.add_paragraph()
+                                insight_para.text = f"💡 AI分析結果: {insight}"
+                                insight_para.font.size = Pt(14)
+                                insight_para.font.bold = True
+                                insight_para.alignment = PP_ALIGN.LEFT
+                                st.success("✅ 1番目のテキストボックスにAI分析結果設定")
+                            
+                            # 2番目のテキストボックス：ページタイトル
+                            if len(content_text_boxes) >= 2:
+                                page_title_box = content_text_boxes[1]
+                                page_title_box.text_frame.clear()
+                                title_para = page_title_box.text_frame.add_paragraph()
+                                title_para.text = slide_title
+                                title_para.font.size = Pt(24)
+                                title_para.font.bold = True
+                                title_para.alignment = PP_ALIGN.LEFT
+                                st.success("✅ 2番目のテキストボックスにページタイトル設定")
+                            
+                            # グラフ画像の保存と挿入
+                            graph_path = f"temp_graph_{selected_filename.replace('.csv', '').replace(' ', '_')}.png"
+                            try:
+                                # 高解像度でグラフを保存
+                                fig.savefig(graph_path, dpi=200, bbox_inches='tight', 
+                                           facecolor='white', edgecolor='none', 
+                                           pad_inches=0.1)
+                                
+                                # グラフをスライドに挿入（画像通りの位置）
+                                content_slide.shapes.add_picture(
+                                    graph_path, 
+                                    Inches(1.5),    # 左からの位置（中央配置）
+                                    Inches(2.8),    # 上からの位置
+                                    width=Inches(7),     # 幅
+                                    height=Inches(4)     # 高さ
+                                )
+                                
+                                st.success("✅ グラフを2枚目の中央に挿入完了")
+                                
+                                # 一時ファイルを削除
+                                if os.path.exists(graph_path):
+                                    os.remove(graph_path)
+                                
+                            except Exception as graph_error:
+                                st.error(f"グラフ挿入エラー: {graph_error}")
+                            
+                            # PowerPointファイル保存
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            pptx_filename = f"経済分析レポート_{selected_filename.replace('.csv', '').replace(' ', '_')}_{timestamp}.pptx"
+                            
+                            prs.save(pptx_filename)
+                            
+                            # ダウンロードボタン
+                            with open(pptx_filename, "rb") as f:
+                                st.download_button(
+                                    label="📥 PowerPointをダウンロード",
+                                    data=f,
+                                    file_name=pptx_filename,
+                                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                    type="primary"
+                                )
+                            
+                            st.success(f"✅ PowerPointファイル「{pptx_filename}」が正常に生成されました！")
+                            st.info("📋 構成:")
+                            st.info("   - 1枚目: 既存スライドの1番目と2番目のテキストボックスを編集")
+                            st.info("   - 2枚目: 既存スライドの1番目と2番目のテキストボックスを編集してグラフを追加")
+                            
+                            # 作成されたファイルの詳細情報
+                            if os.path.exists(pptx_filename):
+                                file_size = os.path.getsize(pptx_filename)
+                                st.info(f"📊 ファイルサイズ: {file_size / 1024:.1f} KB")
+                
+                except Exception as e:
+                    st.error(f"❌ PowerPoint生成中にエラーが発生しました: {str(e)}")
+                    st.error("以下の点を確認してください:")
+                    st.error("1. テンプレートファイルが正しいパスに存在するか")
+                    st.error("2. テンプレートファイルが.pptx形式か（.pptではない）")
+                    st.error("3. ファイルの書き込み権限があるか")
+
+        except Exception as e:
+            st.error(f"❌ Gemini APIエラー: {e}")
+
+# --- サイドバーに追加情報 ---
+with st.sidebar:
+    st.header("📊 アプリ情報")
+    st.info(f"**検索フォルダ:** {CSV_FOLDER}")
+    
+    # 全体のファイル数を表示
+    total_files = sum(len(files) for files in categorized_files.values())
+    st.info(f"**利用可能ファイル数:** {total_files}個")
+    
+    # カテゴリ別ファイル一覧
+    if categorized_files:
+        st.write("**📁 カテゴリ別ファイル一覧:**")
+        for category, filenames in categorized_files.items():
+            st.write(f"**{category}** ({len(filenames)}個)")
+            for i, filename in enumerate(filenames, 1):
+                if category == selected_category and filename == selected_filename:
+                    st.write(f"   ✅ {i}. **{filename}** (選択中)")
+                else:
+                    st.write(f"   {i}. {filename}")
+            st.write("")  # 空行でカテゴリを区切る
