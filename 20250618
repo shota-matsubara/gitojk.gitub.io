@@ -1,0 +1,1223 @@
+# 複合分析のリード文の配置（import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+import numpy as np
+import os
+import glob
+from pptx import Presentation
+from pptx.util import Inches, Pt, Cm
+from pptx.enum.text import PP_ALIGN
+from datetime import datetime
+import google.generativeai as genai
+
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+import numpy as np
+import os
+import glob
+from pptx import Presentation
+from pptx.util import Inches, Pt, Cm
+from pptx.enum.text import PP_ALIGN
+from datetime import datetime
+import google.generativeai as genai
+
+# 設定（最初に配置）
+st.set_page_config(page_title="CSV分析とPPT自動生成", layout="wide")
+st.title("CSVデータ分析 & Gemini示唆 & PowerPoint出力")
+
+# 日本語フォント設定
+def setup_japanese_font():
+    """日本語フォントを設定"""
+    font_candidates = [
+        'Yu Gothic',
+        'Meiryo',
+        'MS Gothic',
+        'Hiragino Sans',
+        'DejaVu Sans'
+    ]
+    
+    available_fonts = [f.name for f in fm.fontManager.ttflist]
+    
+    for font_name in font_candidates:
+        if font_name in available_fonts:
+            plt.rcParams['font.family'] = font_name
+            st.info(f"日本語フォント設定: {font_name}")
+            return font_name
+    
+    st.warning("日本語対応フォントが見つかりません。グラフの日本語が正しく表示されない可能性があります。")
+    return None
+
+# 日本語フォント設定を実行
+setup_japanese_font()
+
+# ファイルパスの定義
+CSV_FOLDER = "C:\\Users\\shomatsubara\\Documents\\Python_project\\"
+PPTX_TEMPLATE_PATH = "C:\\Users\\shomatsubara\\OneDrive - ABeam Consulting Ltd\\ドキュメント\\新人研修\\テンプレ.pptx"
+
+# CSVファイルのカテゴリ定義
+CSV_CATEGORIES = {
+    "金融": [
+        "コール市場統計＜日本銀行＞.csv",
+        "マネタリーベース平均残高.csv",
+        "マネーストック統計＜日本銀行＞.csv",
+        "国内企業物価指数（総平均）2020年基準.csv",
+        "貸出・預金動向＜日本銀行＞.csv",
+        "短観_boj.csv",
+        "東証株価指数（TOPIX）.csv",
+        "輸入物価指数（総平均）（円ベース）2020年基準.csv",
+        "輸出物価指数（総平均）（円ベース）2020年基準.csv"
+    ],
+    "企業・家計・経済": [
+        "企業等数.csv",
+        "景気動向指数（一致）2015年基準.csv",
+        "景気動向指数（一致）2020年基準.csv",
+        "消費者物価指数（総合）2015年基準.csv",
+        "消費者物価指数（総合）2020年基準.csv",
+        "国内総生産（支出側）（名目）（米ドル表示）.csv"
+    ],
+    "鉱業": [
+        "鉱工業生産指数　2015年基準.csv",
+        "鉱工業生産指数　2020年基準.csv",
+        "製造工業生産能力指数　2015年基準.csv",
+        "製造工業生産能力指数　2020年基準.csv",
+        "製造工業稼働率指数　2015年基準.csv",
+        "製造工業稼働率指数　2020年基準.csv"
+    ],
+    "住宅・土地・建物": [
+        "住宅数.csv"
+    ],
+    "人口・世帯": [
+        "世帯数（総数）.csv",
+        "出生数（外国人を含む）.csv",
+        "出生率（人口千対）.csv",
+        "死亡数（外国人を含む）.csv",
+        "死亡率（人口千対）.csv",
+        "総人口（総数）.csv"
+    ],
+    "労働・賃金": [
+        "完全失業率（男女計）.csv",
+        "実質賃金指数（現金給与総額）.csv",
+        "就業率（総数）.csv",
+        "役員を除く雇用者に占める非正規の職員・従業員の割合（男女計）.csv",
+        "正規の職員・従業員（男女計）.csv",
+        "非正規の職員・従業員（男女計）.csv"
+    ]
+}
+
+@st.cache_data
+def get_categorized_csv_files(folder_path, categories):
+    """カテゴリ別にCSVファイルを整理"""
+    try:
+        csv_pattern = os.path.join(folder_path, "*.csv")
+        all_csv_files = glob.glob(csv_pattern)
+        all_csv_filenames = [os.path.basename(file) for file in all_csv_files]
+        
+        categorized_files = {}
+        categorized_paths = {}
+        
+        for category, filenames in categories.items():
+            category_files = []
+            category_paths = []
+            
+            for filename in filenames:
+                if filename in all_csv_filenames:
+                    category_files.append(filename)
+                    file_index = all_csv_filenames.index(filename)
+                    category_paths.append(all_csv_files[file_index])
+            
+            if category_files:
+                categorized_files[category] = category_files
+                categorized_paths[category] = category_paths
+        
+        return categorized_files, categorized_paths, all_csv_filenames
+    except Exception as e:
+        st.error(f"CSVファイルの検索でエラーが発生しました: {e}")
+        return {}, {}, []
+
+@st.cache_data
+def load_csv_data(file_path):
+    """CSVデータを読み込み、前処理を行う"""
+    try:
+        df = pd.read_csv(file_path, encoding="utf-8")
+        df.columns = df.columns.str.strip()
+        
+        if "timeCd" not in df.columns or "value" not in df.columns:
+            return None, "CSVファイルに 'timeCd' と 'value' の列が必要です。"
+        
+        df['timeCd'] = df['timeCd'].astype(str)
+        df['Date'] = None
+        
+        mask_6digit = df['timeCd'].str.len() >= 6
+        if mask_6digit.any():
+            df.loc[mask_6digit, 'Date'] = pd.to_datetime(
+                df.loc[mask_6digit, 'timeCd'].str[:6], 
+                format='%Y%m', 
+                errors='coerce'
+            )
+        
+        mask_8digit = df['timeCd'].str.len() >= 8
+        if mask_8digit.any():
+            df.loc[mask_8digit & df['Date'].isna(), 'Date'] = pd.to_datetime(
+                df.loc[mask_8digit & df['Date'].isna(), 'timeCd'].str[:8], 
+                format='%Y%m%d', 
+                errors='coerce'
+            )
+        
+        mask_4digit = df['timeCd'].str.len() == 4
+        if mask_4digit.any():
+            df.loc[mask_4digit & df['Date'].isna(), 'Date'] = pd.to_datetime(
+                df.loc[mask_4digit & df['Date'].isna(), 'timeCd'] + '01', 
+                format='%Y%m', 
+                errors='coerce'
+            )
+        
+        initial_count = len(df)
+        df = df.dropna(subset=['Date'])
+        df = df.rename(columns={'value': 'Value'})
+        
+        df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
+        df = df.dropna(subset=['Value'])
+        
+        final_count = len(df)
+        
+        if final_count == 0:
+            return None, "有効なデータが見つかりませんでした。日付形式または数値形式を確認してください。"
+        
+        if final_count < initial_count * 0.5:
+            warning_msg = f"注意: データの{initial_count - final_count}行が無効な形式のため除外されました。"
+            return df, warning_msg
+        
+        return df, None
+    except Exception as e:
+        return None, f"CSV 読み込み失敗: {e}"
+
+def detect_significant_changes(df, threshold_percentile=95):
+    """データの大幅な変化点を検出する"""
+    if len(df) < 3:
+        return []
+    
+    # データをコピーしてDate列を確実にdatetime型にする
+    df_sorted = df.copy().sort_values('Date').reset_index(drop=True)
+    
+    # Date列がdatetime型でない場合は変換を試行
+    if not pd.api.types.is_datetime64_any_dtype(df_sorted['Date']):
+        try:
+            df_sorted['Date'] = pd.to_datetime(df_sorted['Date'])
+        except:
+            return []  # 変換できない場合は変化点検出をスキップ
+    
+    changes = []
+    
+    for i in range(1, len(df_sorted) - 1):
+        prev_val = df_sorted.iloc[i-1]['Value']
+        curr_val = df_sorted.iloc[i]['Value']
+        next_val = df_sorted.iloc[i+1]['Value']
+        
+        # 前後の変化率を計算
+        if prev_val != 0:
+            change_rate_prev = abs((curr_val - prev_val) / prev_val) * 100
+        else:
+            change_rate_prev = 0
+            
+        if curr_val != 0:
+            change_rate_next = abs((next_val - curr_val) / curr_val) * 100
+        else:
+            change_rate_next = 0
+        
+        # 最大変化率を記録
+        max_change = max(change_rate_prev, change_rate_next)
+        changes.append({
+            'index': i,
+            'date': df_sorted.iloc[i]['Date'],
+            'value': curr_val,
+            'change_rate': max_change
+        })
+    
+    # 変化率の閾値を計算（上位5%の変化点を抽出）
+    if changes:
+        change_rates = [c['change_rate'] for c in changes]
+        threshold = np.percentile(change_rates, threshold_percentile)
+        significant_changes = [c for c in changes if c['change_rate'] >= threshold and c['change_rate'] > 5]  # 最低5%以上の変化
+        return significant_changes[:3]  # 最大3つまで
+    
+    return []
+
+def generate_change_reason(date, value, filename, model):
+    """変化点の理由を生成する"""
+    # dateがdatetime型でない場合の処理
+    if pd.api.types.is_datetime64_any_dtype(pd.Series([date])):
+        year = date.year
+        month = date.month
+    else:
+        try:
+            date_converted = pd.to_datetime(date)
+            year = date_converted.year
+            month = date_converted.month
+        except:
+            year = "不明"
+            month = "不明"
+    
+    prompt = (
+        f"データ: {filename}\n"
+        f"時期: {year}年{month}月\n"
+        f"数値: {value:.2f}\n\n"
+        f"この時期に{filename.replace('.csv', '')}で大きな変化が発生した理由を、"
+        f"20文字以内で簡潔に説明してください。歴史的事実や経済要因を考慮してください。"
+    )
+    
+    try:
+        response = model.generate_content(prompt)
+        reason = response.text.strip()
+        # 20文字制限を確実にする
+        if len(reason) > 20:
+            reason = reason[:20]
+        return reason
+    except Exception as e:
+        return f"{year}年{month}月変化"
+
+def create_editable_graph(df, filename, year_range=None, highlight_changes=True, model=None):
+    """編集可能なグラフを作成（テキストボックス使用）"""
+    # データをコピー
+    df_plot = df.copy()
+    
+    # Date列がdatetime型でない場合は変換を試行
+    if not pd.api.types.is_datetime64_any_dtype(df_plot['Date']):
+        try:
+            df_plot['Date'] = pd.to_datetime(df_plot['Date'])
+        except Exception as e:
+            st.error(f"日付データの変換に失敗しました: {e}")
+            return None, None, []
+    
+    # 日付でソート
+    df_plot = df_plot.sort_values('Date')
+    
+    # 年度範囲でフィルタリング
+    if year_range and len(year_range) == 2:
+        start_year, end_year = year_range
+        try:
+            mask = (df_plot['Date'].dt.year >= start_year) & (df_plot['Date'].dt.year <= end_year)
+            df_filtered = df_plot[mask]
+            
+            if len(df_filtered) > 0:
+                df_plot = df_filtered
+        except Exception as e:
+            st.warning(f"年度フィルタリングでエラー: {e}")
+    
+    graph_title = f"{filename.replace('.csv', '')} - 経済動向分析"
+    if year_range:
+        graph_title += f" ({year_range[0]}年-{year_range[1]}年)"
+    
+    # タイトルと軸ラベルを削除してシンプルなグラフを作成
+    fig, ax = plt.subplots(figsize=(14, 8))
+    
+    # 基本的な線グラフ（タイトルと軸ラベルなし）
+    ax.plot(df_plot['Date'], df_plot['Value'], marker='o', linewidth=2.5, markersize=5, color='blue', alpha=0.8)
+    
+    # 変化点の強調表示（吹き出しなし）
+    change_reasons = []
+    if highlight_changes and model:
+        significant_changes = detect_significant_changes(df_plot)
+        
+        for change in significant_changes:
+            # 赤い丸で強調（吹き出しなし）
+            ax.scatter(change['date'], change['value'], color='red', s=150, zorder=5, alpha=0.8)
+            ax.scatter(change['date'], change['value'], color='red', s=80, zorder=6)
+            
+            # 変化理由を生成してリストに保存
+            reason = generate_change_reason(change['date'], change['value'], filename, model)
+            change_reasons.append({
+                'date': change['date'],
+                'value': change['value'],
+                'reason': reason
+            })
+    
+    # タイトルと軸ラベルを削除
+    ax.set_title("")
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.grid(True, alpha=0.3)
+    
+    # X軸の表示を調整（ラベルは残す）
+    try:
+        if len(df_plot) > 20:
+            ax.tick_params(axis='x', rotation=45, labelsize=12)
+            years = df_plot['Date'].dt.year.unique()
+            if len(years) > 10:
+                year_ticks = [y for y in years if y % 3 == 0]
+            else:
+                year_ticks = years
+            
+            year_dates = []
+            for year in year_ticks:
+                year_data = df_plot[df_plot['Date'].dt.year == year]
+                if len(year_data) > 0:
+                    year_dates.append(year_data['Date'].iloc[0])
+            
+            if year_dates:
+                ax.set_xticks(year_dates)
+                ax.set_xticklabels([f"{date.year}" for date in year_dates])
+        else:
+            plt.xticks(rotation=45, fontsize=12)
+    except Exception as e:
+        plt.xticks(rotation=45, fontsize=12)
+    
+    plt.yticks(fontsize=12)
+    plt.tight_layout()
+    
+    return fig, graph_title, change_reasons
+
+def create_graph(df, filename, year_range=None, highlight_changes=True, model=None):
+    """表示用グラフを作成（従来通り）"""
+    # データをコピー
+    df_plot = df.copy()
+    
+    # Date列がdatetime型でない場合は変換を試行
+    if not pd.api.types.is_datetime64_any_dtype(df_plot['Date']):
+        try:
+            df_plot['Date'] = pd.to_datetime(df_plot['Date'])
+        except Exception as e:
+            st.error(f"日付データの変換に失敗しました: {e}")
+            return None, None
+    
+    # 日付でソート
+    df_plot = df_plot.sort_values('Date')
+    
+    # 年度範囲でフィルタリング
+    if year_range and len(year_range) == 2:
+        start_year, end_year = year_range
+        try:
+            mask = (df_plot['Date'].dt.year >= start_year) & (df_plot['Date'].dt.year <= end_year)
+            df_filtered = df_plot[mask]
+            
+            if len(df_filtered) > 0:
+                df_plot = df_filtered
+        except Exception as e:
+            st.warning(f"年度フィルタリングでエラー: {e}")
+    
+    graph_title = f"{filename.replace('.csv', '')} - 経済動向分析"
+    if year_range:
+        graph_title += f" ({year_range[0]}年-{year_range[1]}年)"
+    
+    fig, ax = plt.subplots(figsize=(14, 8))
+    
+    # 基本的な線グラフ
+    ax.plot(df_plot['Date'], df_plot['Value'], marker='o', linewidth=2.5, markersize=5, color='blue', alpha=0.8)
+    
+    # 変化点の強調表示
+    if highlight_changes and model:
+        significant_changes = detect_significant_changes(df_plot)
+        
+        for change in significant_changes:
+            # 赤い丸で強調
+            ax.scatter(change['date'], change['value'], color='red', s=150, zorder=5, alpha=0.8)
+            ax.scatter(change['date'], change['value'], color='red', s=80, zorder=6)
+            
+            # 変化理由を生成
+            reason = generate_change_reason(change['date'], change['value'], filename, model)
+            
+            # 吹き出しの追加
+            ax.annotate(reason, 
+                       xy=(change['date'], change['value']), 
+                       xytext=(20, 20), 
+                       textcoords='offset points',
+                       bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7),
+                       arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0.2', color='red'),
+                       fontsize=10,
+                       ha='left')
+    
+    ax.set_title(graph_title, fontsize=18, pad=25)
+    ax.set_xlabel("年月", fontsize=14)
+    ax.set_ylabel("数値", fontsize=14)
+    ax.grid(True, alpha=0.3)
+    
+    # X軸の表示を調整
+    try:
+        if len(df_plot) > 20:
+            ax.tick_params(axis='x', rotation=45, labelsize=12)
+            years = df_plot['Date'].dt.year.unique()
+            if len(years) > 10:
+                year_ticks = [y for y in years if y % 3 == 0]
+            else:
+                year_ticks = years
+            
+            year_dates = []
+            for year in year_ticks:
+                year_data = df_plot[df_plot['Date'].dt.year == year]
+                if len(year_data) > 0:
+                    year_dates.append(year_data['Date'].iloc[0])
+            
+            if year_dates:
+                ax.set_xticks(year_dates)
+                ax.set_xticklabels([f"{date.year}年" for date in year_dates])
+        else:
+            plt.xticks(rotation=45, fontsize=12)
+    except Exception as e:
+        plt.xticks(rotation=45, fontsize=12)
+    
+    plt.yticks(fontsize=12)
+    plt.tight_layout()
+    
+    return fig, graph_title
+
+def create_composite_graph(analysis_results, year_range=None):
+    """複数データの複合グラフを作成（単一グラフと同じ形式）"""
+    fig, ax = plt.subplots(figsize=(14, 8))
+    
+    colors = plt.cm.tab10(range(len(analysis_results)))
+    
+    for i, result in enumerate(analysis_results):
+        df = result['df'].copy()
+        label = result['filename'].replace('.csv', '').replace('＜日本銀行＞', '').strip()
+        
+        # 年度範囲でフィルタリング
+        if year_range and len(year_range) == 2:
+            start_year, end_year = year_range
+            try:
+                # Date列がdatetime型でない場合は変換を試行
+                if not pd.api.types.is_datetime64_any_dtype(df['Date']):
+                    df['Date'] = pd.to_datetime(df['Date'])
+                
+                mask = (df['Date'].dt.year >= start_year) & (df['Date'].dt.year <= end_year)
+                df_filtered = df[mask]
+                
+                if len(df_filtered) > 0:
+                    df = df_filtered
+            except Exception as e:
+                pass  # フィルタリングでエラーが発生した場合はそのまま進む
+        
+        # 正規化
+        normalized_values = (df['Value'] - df['Value'].min()) / (df['Value'].max() - df['Value'].min())
+        
+        ax.plot(df['Date'], normalized_values, 
+                marker='o', linewidth=2.5, markersize=4, 
+                color=colors[i], label=label, alpha=0.8)
+    
+    # タイトルと軸ラベルを削除（単一グラフと同じ）
+    ax.set_title("")
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.grid(True, alpha=0.3)
+    # 凡例も削除
+    # ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
+    plt.xticks(rotation=45, fontsize=12)
+    plt.yticks(fontsize=12)
+    plt.tight_layout()
+    
+    return fig
+
+def generate_ai_insights(df, filename, model):
+    """AI示唆とタイトルを生成"""
+    csv_data_for_prompt = (
+        df.sort_values("Date")[["Date", "Value"]]
+        .tail(100)
+        .to_string(index=False)
+    )
+    
+    date_min = df['Date'].min()
+    date_max = df['Date'].max()
+    date_range_text = ""
+    if pd.notna(date_min) and pd.notna(date_max):
+        date_range_text = f"- 期間: {date_min.strftime('%Y年%m月')} ～ {date_max.strftime('%Y年%m月')}\n"
+    else:
+        date_range_text = "- 期間: 日付情報が不完全\n"
+    
+    prompt = (
+        f"ファイル名: {filename}\n\n"
+        "以下は時系列の経済データです。\n"
+        "グラフを分析し、以下を実行してください：\n"
+        "1. トレンドの要点を整理し、データに基づく今後の経済影響を予測してください。80文字以上100文字以内で断言調（〜だ、〜である）で記述し、文字数は表示しないでください。\n\n"
+        f"データ統計:\n"
+        f"{date_range_text}"
+        f"- 最大値: {df['Value'].max():.2f}\n"
+        f"- 最小値: {df['Value'].min():.2f}\n"
+        f"- 平均値: {df['Value'].mean():.2f}\n\n"
+        "【トレンドデータ（Date, Value）】:\n"
+        f"{csv_data_for_prompt}"
+    )
+    
+    title_prompt = (
+        f"ファイル名: {filename}\n\n"
+        "以下は時系列の経済データです。\n"
+        "このデータの分析結果を表現する、15文字程度の簡潔なタイトルを1つだけ生成してください。\n"
+        "タイトルのみを回答し、説明文は不要です。\n\n"
+        "【トレンドデータ（Date, Value）】:\n"
+        f"{csv_data_for_prompt}"
+    )
+    
+    try:
+        response = model.generate_content(prompt)
+        insight = response.text.strip()
+        
+        title_response = model.generate_content(title_prompt)
+        slide_title = title_response.text.strip()
+        
+        return insight, slide_title
+    except Exception as e:
+        return f"AI分析エラー: {e}", f"データ分析_{filename.replace('.csv', '')}"
+
+def generate_composite_insights(analysis_results, model, year_range=None):
+    """複合グラフからの示唆を生成（単一グラフと同じプロンプト・文字制限）"""
+    data_summary = []
+    for result in analysis_results:
+        df = result['df'].copy()
+        filename = result['filename']
+        
+        # 年度範囲でフィルタリング
+        if year_range and len(year_range) == 2:
+            start_year, end_year = year_range
+            try:
+                # Date列がdatetime型でない場合は変換を試行
+                if not pd.api.types.is_datetime64_any_dtype(df['Date']):
+                    df['Date'] = pd.to_datetime(df['Date'])
+                
+                mask = (df['Date'].dt.year >= start_year) & (df['Date'].dt.year <= end_year)
+                df_filtered = df[mask]
+                
+                if len(df_filtered) > 0:
+                    df = df_filtered
+            except Exception as e:
+                pass  # フィルタリングでエラーが発生した場合はそのまま進む
+        
+        if len(df) > 0:
+            data_summary.append(f"- {filename}: 期間{df['Date'].min().strftime('%Y年%m月')}～{df['Date'].max().strftime('%Y年%m月')}, 最新値{df['Value'].iloc[-1]:.2f}")
+    
+    summary_text = "\n".join(data_summary)
+    
+    # 単一グラフと同じプロンプト形式を使用
+    composite_prompt = (
+        f"複合データ分析: {len(analysis_results)}個の経済指標\n\n"
+        "以下は時系列の経済データです。\n"
+        "グラフを分析し、以下を実行してください：\n"
+        "1. トレンドの要点を整理し、データに基づく今後の経済影響を予測してください。80文字以上100文字以内で断言調（〜だ、〜である）で記述し、文字数は表示しないでください。\n\n"
+        f"データ統計:\n"
+        f"{summary_text}\n\n"
+        "【複合分析データ】:\n"
+        f"分析対象: {len(analysis_results)}個の経済指標の横断的分析"
+    )
+    
+    composite_title_prompt = (
+        f"複合データ分析: {len(analysis_results)}個の経済指標\n\n"
+        "以下は時系列の経済データです。\n"
+        "このデータの分析結果を表現する、15文字程度の簡潔なタイトルを1つだけ生成してください。\n"
+        "タイトルのみを回答し、説明文は不要です。\n\n"
+        f"【分析対象】:\n{summary_text}"
+    )
+    
+    try:
+        response = model.generate_content(composite_prompt)
+        composite_insight = response.text.strip()
+        
+        # 単一グラフと同じ文字数制限（80-100文字）
+        insight_length = len(composite_insight)
+        if insight_length < 80:
+            # 80文字未満の場合は再生成を試行
+            extended_prompt = composite_prompt.replace(
+                "1. トレンドの要点を整理し、データに基づく今後の経済影響を予測してください。80文字以上100文字以内で断言調（〜だ、〜である）で記述し、文字数は表示しないでください。\n",
+                "1. トレンドの要点を整理し、データに基づく今後の経済影響を予測してください。80文字以上100文字以内で断言調（〜だ、〜である）で詳細に記述し、具体的な傾向を含めて文字数は表示しないでください。\n"
+            )
+            response = model.generate_content(extended_prompt)
+            composite_insight = response.text.strip()
+            insight_length = len(composite_insight)
+        
+        if insight_length > 100:
+            # 100文字超過の場合は切り詰める
+            composite_insight = composite_insight[:100]
+        
+        title_response = model.generate_content(composite_title_prompt)
+        composite_title = title_response.text.strip()
+        
+        return composite_insight, composite_title
+    except Exception as e:
+        # エラー時のデフォルト文字数調整
+        default_insight = f"複数経済指標の横断分析により、日本経済の構造的変化と今後の政策方向性を総合的に評価した結果、持続的成長への課題が明確になった。"
+        return default_insight, "経済指標複合分析"
+
+# ファイル選択
+st.subheader("① CSVファイルの選択")
+
+categorized_files, categorized_paths, all_filenames = get_categorized_csv_files(CSV_FOLDER, CSV_CATEGORIES)
+
+if not categorized_files:
+    st.error(f"指定フォルダ「{CSV_FOLDER}」に対象のCSVファイルが見つかりません。")
+    st.stop()
+
+selected_files = []
+selected_paths = []
+
+st.write("**■ 分析対象ファイルを選択してください（複数選択可能）:**")
+
+for category, filenames in categorized_files.items():
+    st.write(f"**{category}**")
+    
+    select_all = st.checkbox(f"■ {category}の全ファイルを選択", key=f"select_all_{category}")
+    
+    col1, col2 = st.columns([1, 3])
+    with col2:
+        for filename in filenames:
+            default_checked = select_all
+            
+            if st.checkbox(filename, value=default_checked, key=f"file_{category}_{filename}"):
+                selected_files.append(filename)
+                file_index = categorized_files[category].index(filename)
+                selected_paths.append(categorized_paths[category][file_index])
+    
+    st.write("")
+
+if selected_files:
+    st.success(f"✓ 選択されたファイル数: **{len(selected_files)}個**")
+    with st.expander("選択されたファイル一覧"):
+        for i, filename in enumerate(selected_files, 1):
+            st.write(f"{i}. {filename}")
+else:
+    st.warning("⚠️ 分析するファイルを選択してください。")
+    st.stop()
+
+# グラフカスタマイズ設定
+st.subheader("② グラフカスタマイズ設定")
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    enable_year_filter = st.checkbox("■ 年度範囲を指定", value=False)
+    
+with col2:
+    if enable_year_filter:
+        # データから年度範囲を取得して初期値を設定
+        all_years = set()
+        for file_path in selected_paths:
+            try:
+                temp_df, _ = load_csv_data(file_path)
+                if temp_df is not None and 'Date' in temp_df.columns:
+                    # Date列がdatetime型でない場合は変換を試行
+                    if not pd.api.types.is_datetime64_any_dtype(temp_df['Date']):
+                        temp_df['Date'] = pd.to_datetime(temp_df['Date'], errors='coerce')
+                    
+                    # NaTでない値から年を取得
+                    valid_dates = temp_df['Date'].dropna()
+                    if len(valid_dates) > 0:
+                        all_years.update(valid_dates.dt.year.unique())
+            except Exception as e:
+                continue
+        
+        if all_years:
+            # 2024年までに制限
+            all_years = {year for year in all_years if year <= 2024}
+            
+            if all_years:
+                min_year = min(all_years)
+                max_year = max(all_years)
+                start_year = st.selectbox("開始年", options=sorted(all_years), index=0)
+                end_year = st.selectbox("終了年", options=sorted(all_years), index=len(sorted(all_years))-1)
+                year_range = [start_year, end_year]
+            else:
+                st.warning("2024年以前のデータが見つかりませんでした")
+                year_range = None
+        else:
+            st.warning("年度データが取得できませんでした")
+            year_range = None
+    else:
+        year_range = None
+
+with col3:
+    enable_highlight = st.checkbox("● 変化点を強調表示", value=True)
+
+# Gemini APIキーの取得
+api_key = os.getenv("GOOGLE_API_KEY")
+if not api_key:
+    st.error("環境変数 'GOOGLE_API_KEY' が設定されていません。PowerShell または .env で設定してください。")
+    st.stop()
+
+genai.configure(api_key=api_key)
+model = genai.GenerativeModel("gemini-2.5-flash-preview-04-17")
+
+# データ読み込みと分析
+st.subheader("③ データの読み込みと分析")
+
+analysis_results = []
+
+for i, (filename, file_path) in enumerate(zip(selected_files, selected_paths)):
+    st.write(f"**● {i+1}/{len(selected_files)}: {filename}**")
+    
+    df, error_message = load_csv_data(file_path)
+    
+    if error_message and "注意:" not in error_message:
+        st.error(f"❌ {filename}: {error_message}")
+        continue
+    elif error_message:
+        st.warning(f"⚠️ {filename}: {error_message}")
+    
+    if df is None or len(df) == 0:
+        st.error(f"❌ {filename}: 有効なデータが読み込めませんでした。")
+        continue
+    
+    # カスタマイズされたグラフを作成
+    result = create_graph(df, filename, year_range, enable_highlight, model if enable_highlight else None)
+    
+    # create_graph関数がエラーでNoneを返した場合の処理
+    if result is None or result[0] is None:
+        st.error(f"❌ {filename}: グラフの作成に失敗しました。データ形式を確認してください。")
+        continue
+    
+    fig, graph_title = result
+    
+    with st.spinner(f"AI分析中... ({filename})"):
+        insight, slide_title = generate_ai_insights(df, filename, model)
+    
+    analysis_results.append({
+        'filename': filename,
+        'df': df,
+        'fig': fig,
+        'graph_title': graph_title,
+        'insight': insight,
+        'slide_title': slide_title
+    })
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.pyplot(fig)
+    with col2:
+        # 年度フィルタ適用後のデータ統計
+        display_df = df.copy()
+        if year_range:
+            # Date列がdatetime型であることを確認
+            if not pd.api.types.is_datetime64_any_dtype(display_df['Date']):
+                try:
+                    display_df['Date'] = pd.to_datetime(display_df['Date'])
+                except:
+                    pass  # 変換できない場合はそのまま進む
+            
+            # datetime型の場合のみフィルタリングを実行
+            if pd.api.types.is_datetime64_any_dtype(display_df['Date']):
+                try:
+                    mask = (display_df['Date'].dt.year >= year_range[0]) & (display_df['Date'].dt.year <= year_range[1])
+                    filtered_df = display_df[mask]
+                    if len(filtered_df) > 0:
+                        display_df = filtered_df
+                except:
+                    pass  # フィルタリングでエラーが発生した場合はそのまま進む
+        
+        st.write(f"**データ件数:** {len(display_df)}行")
+        if not display_df['Date'].isna().all():
+            date_min = display_df['Date'].min()
+            date_max = display_df['Date'].max()
+            if pd.notna(date_min) and pd.notna(date_max):
+                st.write(f"**期間:** {date_min.strftime('%Y年%m月')} ～ {date_max.strftime('%Y年%m月')}")
+        st.write(f"**最大値:** {display_df['Value'].max():.2f}")
+        st.write(f"**最小値:** {display_df['Value'].min():.2f}")
+        st.write(f"**平均値:** {display_df['Value'].mean():.2f}")
+        
+        # 変化点情報の表示
+        if enable_highlight:
+            changes = detect_significant_changes(display_df)
+            if changes:
+                st.write("**● 主要な変化点:**")
+                for j, change in enumerate(changes, 1):
+                    st.write(f"{j}. {change['date'].strftime('%Y年%m月')}: {change['change_rate']:.1f}%変化")
+    
+    st.write(f"**[AI] AIタイトル:** {slide_title}")
+    st.write(f"**[AI] 分析結果:** {insight}")
+    st.write("---")
+
+# PowerPoint生成
+st.subheader("④ PowerPoint生成")
+
+if analysis_results:
+    st.success(f"✓ 分析完了: {len(analysis_results)}個のファイルを処理しました")
+    
+    if categorized_files:
+        st.write("**■ カテゴリ別ファイル一覧:**")
+        for category, filenames in categorized_files.items():
+            selected_in_category = [f for f in filenames if f in selected_files]
+            st.write(f"**{category}** ({len(filenames)}個, 選択: {len(selected_in_category)}個)")
+            for i, filename in enumerate(filenames, 1):
+                if filename in selected_files:
+                    st.write(f"   ✓ {i}. **{filename}** (選択中)")
+                else:
+                    st.write(f"   {i}. {filename}")
+            st.write("")
+    
+    if st.button("■ PowerPointを生成", type="primary"):
+        with st.spinner("PowerPointを生成中..."):
+            try:
+                if not os.path.exists(PPTX_TEMPLATE_PATH):
+                    st.error(f"テンプレートファイルが見つかりません: {PPTX_TEMPLATE_PATH}")
+                else:
+                    prs = Presentation(PPTX_TEMPLATE_PATH)
+                    
+                    original_slides = len(prs.slides)
+                    st.info(f"既存スライド数: {original_slides}枚")
+                    
+                    if original_slides < 2:
+                        st.error("テンプレートに最低2枚のスライドが必要です。")
+                    else:
+                        st.info("📄 1枚目: タイトルページを編集中...")
+                        
+                        title_slide = prs.slides[0]
+                        text_boxes = []
+                        for shape in title_slide.shapes:
+                            if hasattr(shape, 'text_frame') and shape.text_frame:
+                                text_boxes.append(shape)
+                        
+                        if len(text_boxes) >= 1:
+                            title_box = text_boxes[0]
+                            title_box.text_frame.clear()
+                            title_para = title_box.text_frame.add_paragraph()
+                            title_para.text = "経済データ分析レポート"
+                            title_para.font.size = Pt(28)
+                            title_para.font.bold = True
+                            title_para.alignment = PP_ALIGN.LEFT
+                        
+                        if len(text_boxes) >= 2:
+                            info_box = text_boxes[1]
+                            info_box.text_frame.clear()
+                            para1 = info_box.text_frame.add_paragraph()
+                            para1.text = f"作成日: {datetime.now().strftime('%Y年%m月%d日')}"
+                            para1.font.size = Pt(16)
+                            para1.alignment = PP_ALIGN.LEFT
+                        
+                        base_slide = prs.slides[1]
+                        slide_layout = base_slide.slide_layout
+                        
+                        for i, result in enumerate(analysis_results):
+                            st.info(f"📈 {i+2}枚目: {result['filename']} のページを作成中...")
+                            
+                            if i == 0:
+                                content_slide = base_slide
+                            else:
+                                insert_index = 1 + i
+                                
+                                xml_slides = prs.slides._sldIdLst
+                                slide_layout = base_slide.slide_layout
+                                content_slide = prs.slides.add_slide(slide_layout)
+                                
+                                new_slide_element = xml_slides[-1]
+                                xml_slides.remove(new_slide_element)
+                                xml_slides.insert(insert_index, new_slide_element)
+                            
+                            content_text_boxes = []
+                            for shape in content_slide.shapes:
+                                if hasattr(shape, 'text_frame') and shape.text_frame:
+                                    content_text_boxes.append(shape)
+                            
+                            # リード文の配置（上部、左寄せ） - 💡 AI分析結果: を削除
+                            if len(content_text_boxes) >= 1:
+                                insight_box = content_text_boxes[0]
+                                insight_box.text_frame.clear()
+                                # 最初の段落を直接使用（空白行を避ける）
+                                insight_box.text_frame.text = result['insight']
+                                # フォント設定を適用
+                                for paragraph in insight_box.text_frame.paragraphs:
+                                    paragraph.font.size = Pt(16)
+                                    paragraph.font.bold = False
+                                    paragraph.alignment = PP_ALIGN.LEFT
+                            
+                            # タイトルの配置（左上、大きめ、太字）
+                            if len(content_text_boxes) >= 2:
+                                page_title_box = content_text_boxes[1]
+                                page_title_box.text_frame.clear()
+                                # 最初の段落を直接使用（空白行を避ける）
+                                page_title_box.text_frame.text = result['slide_title']
+                                # フォント設定を適用
+                                for paragraph in page_title_box.text_frame.paragraphs:
+                                    paragraph.font.size = Pt(32)
+                                    paragraph.font.bold = True
+                                    paragraph.alignment = PP_ALIGN.LEFT
+                            
+                            # 編集可能なグラフを作成
+                            editable_fig, editable_title, change_reasons = create_editable_graph(
+                                result['df'], result['filename'], year_range, enable_highlight, model if enable_highlight else None
+                            )
+                            
+                            if editable_fig is not None:
+                                # グラフを挿入（リード文と被らない位置：下部に配置）
+                                graph_path = f"temp_editable_graph_{i}_{result['filename'].replace('.csv', '').replace(' ', '_')}.png"
+                                try:
+                                    editable_fig.savefig(graph_path, dpi=200, bbox_inches='tight', 
+                                                        facecolor='white', edgecolor='none', 
+                                                        pad_inches=0.1)
+                                    
+                                    # グラフを中央に大きく配置
+                                    content_slide.shapes.add_picture(
+                                        graph_path, 
+                                        Cm(7),      # 左から7cm
+                                        Cm(6),      # 上から6cm（タイトル・リード文の下）
+                                        width=Cm(20),   # 幅20cm（大きく）
+                                        height=Cm(12)   # 高さ12cm
+                                    )
+                                    
+                                    # グラフタイトルをテキストボックスで追加（グラフの真上）
+                                    title_textbox = content_slide.shapes.add_textbox(
+                                        Cm(7), Cm(5.2), Cm(20), Cm(0.6)  # グラフの真上
+                                    )
+                                    title_frame = title_textbox.text_frame
+                                    title_frame.clear()
+                                    title_frame.text = editable_title
+                                    # フォント設定を適用
+                                    for paragraph in title_frame.paragraphs:
+                                        paragraph.font.size = Pt(12)
+                                        paragraph.font.bold = False
+                                        paragraph.alignment = PP_ALIGN.CENTER
+                                    
+                                    # Y軸ラベルをテキストボックスで追加（グラフ左側、縦書き風）
+                                    y_label_textbox = content_slide.shapes.add_textbox(
+                                        Cm(6), Cm(9), Cm(0.8), Cm(6)  # グラフの左側
+                                    )
+                                    y_label_frame = y_label_textbox.text_frame
+                                    y_label_frame.clear()
+                                    y_label_frame.text = "数値"
+                                    # フォント設定を適用
+                                    for paragraph in y_label_frame.paragraphs:
+                                        paragraph.font.size = Pt(10)
+                                        paragraph.alignment = PP_ALIGN.CENTER
+                                    
+                                    # X軸ラベルをテキストボックスで追加（グラフの下部中央）
+                                    x_label_textbox = content_slide.shapes.add_textbox(
+                                        Cm(15), Cm(18.5), Cm(4), Cm(0.6)  # グラフの下部中央
+                                    )
+                                    x_label_frame = x_label_textbox.text_frame
+                                    x_label_frame.clear()
+                                    x_label_frame.text = "年月"
+                                    # フォント設定を適用
+                                    for paragraph in x_label_frame.paragraphs:
+                                        paragraph.font.size = Pt(10)
+                                        paragraph.alignment = PP_ALIGN.CENTER
+                                    
+                                    # 変化点の説明をテキストボックスで追加（グラフ下部左側）
+                                    if change_reasons:
+                                        change_y_position = 19.5
+                                        for j, change_info in enumerate(change_reasons):
+                                            if j < 3:  # 最大3つまで
+                                                change_textbox = content_slide.shapes.add_textbox(
+                                                    Cm(7), Cm(change_y_position), Cm(10), Cm(0.5)
+                                                )
+                                                change_frame = change_textbox.text_frame
+                                                change_frame.clear()
+                                                change_frame.text = f"● {change_info['date'].strftime('%Y年%m月')}: {change_info['reason']}"
+                                                # フォント設定を適用
+                                                for paragraph in change_frame.paragraphs:
+                                                    paragraph.font.size = Pt(9)
+                                                    paragraph.alignment = PP_ALIGN.LEFT
+                                                change_y_position += 0.6
+                                    
+                                    # 出典をテキストボックスで追加（右下角）
+                                    source_textbox = content_slide.shapes.add_textbox(
+                                        Cm(20), Cm(20.5), Cm(6), Cm(0.8)  # 右下角
+                                    )
+                                    source_frame = source_textbox.text_frame
+                                    source_frame.clear()
+                                    source_frame.text = f"出典：{result['filename']}"
+                                    # フォント設定を適用
+                                    for paragraph in source_frame.paragraphs:
+                                        paragraph.font.size = Pt(9)
+                                        paragraph.alignment = PP_ALIGN.RIGHT
+                                    
+                                    if os.path.exists(graph_path):
+                                        os.remove(graph_path)
+                                    
+                                except Exception as graph_error:
+                                    st.error(f"グラフ挿入エラー ({result['filename']}): {graph_error}")
+                            else:
+                                st.error(f"編集可能グラフの作成に失敗しました: {result['filename']}")
+                        
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        
+                        if len(analysis_results) > 1:
+                            st.info("📊 複合グラフページ: 全データの複合分析を作成中...")
+                            
+                            composite_fig = create_composite_graph(analysis_results, year_range)
+                            
+                            with st.spinner("複合分析のAI示唆を生成中..."):
+                                composite_insight, composite_title = generate_composite_insights(analysis_results, model, year_range)
+                            
+                            slide_layout = base_slide.slide_layout
+                            composite_slide = prs.slides.add_slide(slide_layout)
+                            
+                            xml_slides = prs.slides._sldIdLst
+                            new_slide_element = xml_slides[-1]
+                            xml_slides.remove(new_slide_element)
+                            insert_position = 1 + len(analysis_results)
+                            xml_slides.insert(insert_position, new_slide_element)
+                            
+                            composite_text_boxes = []
+                            for shape in composite_slide.shapes:
+                                if hasattr(shape, 'text_frame') and shape.text_frame:
+                                    composite_text_boxes.append(shape)
+                            
+                            # 複合分析のリード文の配置（単一グラフと同じ形式）
+                            if len(composite_text_boxes) >= 1:
+                                insight_box = composite_text_boxes[0]
+                                insight_box.text_frame.clear()
+                                insight_box.text_frame.text = composite_insight
+                                # フォント設定を適用
+                                for paragraph in insight_box.text_frame.paragraphs:
+                                    paragraph.font.size = Pt(16)
+                                    paragraph.font.bold = False
+                                    paragraph.alignment = PP_ALIGN.LEFT
+                            
+                            # 複合分析のタイトルの配置（単一グラフと同じ位置：左上、大きめ、太字）
+                            if len(composite_text_boxes) >= 2:
+                                page_title_box = composite_text_boxes[1]
+                                page_title_box.text_frame.clear()
+                                page_title_box.text_frame.text = composite_title
+                                # フォント設定を適用
+                                for paragraph in page_title_box.text_frame.paragraphs:
+                                    paragraph.font.size = Pt(32)
+                                    paragraph.font.bold = True
+                                    paragraph.alignment = PP_ALIGN.LEFT
+                            
+                            composite_graph_path = f"temp_composite_graph_{timestamp}.png"
+                            try:
+                                composite_fig.savefig(composite_graph_path, dpi=200, bbox_inches='tight', 
+                                                    facecolor='white', edgecolor='none', 
+                                                    pad_inches=0.1)
+                                
+                                # 複合グラフを中央に大きく配置
+                                composite_slide.shapes.add_picture(
+                                    composite_graph_path, 
+                                    Cm(7),
+                                    Cm(6),
+                                    width=Cm(20),
+                                    height=Cm(12)
+                                )
+                                
+                                # 複合グラフのタイトルをテキストボックスで追加（グラフの真上）
+                                comp_title_textbox = composite_slide.shapes.add_textbox(
+                                    Cm(7), Cm(5.2), Cm(20), Cm(0.6)
+                                )
+                                comp_title_frame = comp_title_textbox.text_frame
+                                comp_title_frame.clear()
+                                comp_title_frame.text = f"{len(analysis_results)}指標複合分析 - 経済動向総合評価"
+                                # フォント設定を適用
+                                for paragraph in comp_title_frame.paragraphs:
+                                    paragraph.font.size = Pt(12)
+                                    paragraph.font.bold = False
+                                    paragraph.alignment = PP_ALIGN.CENTER
+                                
+                                # 複合グラフの軸ラベル（単一グラフと同じ形式）
+                                comp_y_label_textbox = composite_slide.shapes.add_textbox(
+                                    Cm(6), Cm(9), Cm(0.8), Cm(6)
+                                )
+                                comp_y_label_frame = comp_y_label_textbox.text_frame
+                                comp_y_label_frame.clear()
+                                comp_y_label_frame.text = "数値"
+                                # フォント設定を適用
+                                for paragraph in comp_y_label_frame.paragraphs:
+                                    paragraph.font.size = Pt(10)
+                                    paragraph.alignment = PP_ALIGN.CENTER
+                                
+                                comp_x_label_textbox = composite_slide.shapes.add_textbox(
+                                    Cm(15), Cm(18.5), Cm(4), Cm(0.6)
+                                )
+                                comp_x_label_frame = comp_x_label_textbox.text_frame
+                                comp_x_label_frame.clear()
+                                comp_x_label_frame.text = "年月"
+                                # フォント設定を適用
+                                for paragraph in comp_x_label_frame.paragraphs:
+                                    paragraph.font.size = Pt(10)
+                                    paragraph.alignment = PP_ALIGN.CENTER
+                                
+                                # 複合グラフの出典をテキストボックスで追加（右下角）
+                                comp_source_textbox = composite_slide.shapes.add_textbox(
+                                    Cm(20), Cm(20.5), Cm(6), Cm(0.8)
+                                )
+                                comp_source_frame = comp_source_textbox.text_frame
+                                comp_source_frame.clear()
+                                source_files = ", ".join([result['filename'] for result in analysis_results[:3]])  # 最大3つまで表示
+                                if len(analysis_results) > 3:
+                                    source_files += f" 他{len(analysis_results)-3}件"
+                                comp_source_frame.text = f"出典：{source_files}"
+                                # フォント設定を適用
+                                for paragraph in comp_source_frame.paragraphs:
+                                    paragraph.font.size = Pt(9)
+                                    paragraph.alignment = PP_ALIGN.RIGHT
+                                
+                                if os.path.exists(composite_graph_path):
+                                    os.remove(composite_graph_path)
+                                
+                                st.success("✓ 複合グラフページを追加完了")
+                                
+                            except Exception as graph_error:
+                                st.error(f"複合グラフ挿入エラー: {graph_error}")
+                        
+                        else:
+                            st.info("ℹ️ データが1つのため、複合グラフはスキップされました")
+                        
+                        pptx_filename = f"経済分析レポート_複数データ_{timestamp}.pptx"
+                        
+                        prs.save(pptx_filename)
+                        
+                        with open(pptx_filename, "rb") as f:
+                            st.download_button(
+                                label="■ PowerPointをダウンロード",
+                                data=f,
+                                file_name=pptx_filename,
+                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                type="primary"
+                            )
+                        
+                        total_slides = len(prs.slides)
+                        st.success(f"✓ PowerPointファイル「{pptx_filename}」が正常に生成されました！")
+                        st.info("■ 構成:")
+                        st.info(f"   - 1枚目: タイトルページ")
+                        st.info(f"   - 2～{1+len(analysis_results)}枚目: 各データの分析結果（{len(analysis_results)}個）")
+                        if len(analysis_results) > 1:
+                            st.info(f"   - {2+len(analysis_results)}枚目: 複合グラフ分析")
+                        if total_slides > 1 + len(analysis_results) + (1 if len(analysis_results) > 1 else 0):
+                            remaining_start = 2 + len(analysis_results) + (1 if len(analysis_results) > 1 else 0)
+                            st.info(f"   - {remaining_start}～{total_slides}枚目: テンプレートの元ページ")
+                        
+                        if os.path.exists(pptx_filename):
+                            file_size = os.path.getsize(pptx_filename)
+                            st.info(f"■ ファイルサイズ: {file_size / 1024:.1f} KB")
+                            st.info(f"■ グラフ位置: 左から7cm、上から6cm、サイズ: 幅20cm×高さ12cm")
+                            st.info("■ グラフの文字列は編集可能なテキストボックスで作成（空白行なし）")
+                            st.info("■ リード文は16ptフォント、出典情報をスライド右下角に自動追加")
+            
+            except Exception as e:
+                st.error(f"× PowerPoint生成中にエラーが発生しました: {str(e)}")
+else:
+    st.warning("! 分析結果がありません。ファイルを選択して分析を実行してください。")
+
+# サイドバーに追加情報
+with st.sidebar:
+    st.header("■ アプリ情報")
+    st.info(f"**検索フォルダ:** {CSV_FOLDER}")
+    
+    total_files = sum(len(files) for files in categorized_files.values())
+    st.info(f"**利用可能ファイル数:** {total_files}個")
+    st.info(f"**選択済みファイル数:** {len(selected_files)}個")
+    
+    st.write("**■ 機能一覧:**")
+    st.write("- CSVデータ自動読み込み")
+    st.write("- 日本語フォント対応")
+    st.write("- 年度範囲フィルタリング")
+    st.write("- 変化点自動検出")
+    st.write("- Gemini AI分析")
+    st.write("- PowerPoint自動生成")
+    st.write("- 複合グラフ作成")
+    
+    st.write("**■ 設定情報:**")
+    if enable_year_filter and year_range:
+        st.write(f"- 年度範囲: {year_range[0]}年～{year_range[1]}年")
+    else:
+        st.write("- 年度範囲: 全期間")
+    
+    if enable_highlight:
+        st.write("- 変化点強調: 有効")
+    else:
+        st.write("- 変化点強調: 無効")
+    
+    st.write("**■ 使用方法:**")
+    st.write("1. カテゴリ別にCSVファイルを選択")
+    st.write("2. グラフ設定をカスタマイズ")
+    st.write("3. AI分析結果を確認")
+    st.write("4. PowerPointファイルを生成・ダウンロード")
+    
+    st.write("**■ 技術情報:**")
+    st.write("- フレームワーク: Streamlit")
+    st.write("- AI: Google Gemini 2.5")
+    st.write("- グラフ: Matplotlib")
+    st.write("- PPT: python-pptx")
+    st.write("- データ処理: Pandas")
